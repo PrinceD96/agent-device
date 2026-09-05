@@ -112,6 +112,82 @@ test('a removed wire declaration passes with a bump', () => {
   assert.deepEqual(result.failures, []);
 });
 
+// #2318 moved the daemon HTTP wire contract from src/daemon to
+// packages/contracts. A declaration that left its path but was re-declared
+// unchanged is a file move, not a removal: a released peer still parses it,
+// so it must not force a protocol bump.
+test('a declaration moved to a new file unchanged is a move, not a removal', () => {
+  const movedFrom = 'src/daemon/http-contract.ts#buildDaemonHttpUrl';
+  const movedTo = 'packages/contracts/src/daemon-http.ts#buildDaemonHttpUrl';
+  const released = ledger({
+    declarations: { [movedFrom]: 'sha256:ddd', [META]: 'sha256:bbb' },
+  });
+  const current = ledger({ declarations: { [movedTo]: 'sha256:ddd', [META]: 'sha256:bbb' } });
+  const result = compareWireLedgers({
+    baselineTag: 'v0.20.6',
+    released,
+    current,
+    digests: new Map(Object.entries({ [movedTo]: 'sha256:ddd', [META]: 'sha256:bbb' })),
+  });
+  assert.deepEqual(result.moved, [movedFrom]);
+  assert.deepEqual(result.removed, []);
+  assert.deepEqual(result.added, []);
+  assert.deepEqual(result.failures, []);
+});
+
+// A baseline key that leaves and a same-named key that arrives with a moved
+// digest are textually indistinguishable, so the gate reads the pair as a
+// CHANGE at the destination (ackable at the new digest) rather than the
+// bump-only removal the key-pair alone would suggest.
+test('a move that changes the shape is a change, acked at the path it moved to', () => {
+  const movedFrom = 'src/daemon/http-health.ts#buildDaemonHealthPayload';
+  const movedTo = 'packages/contracts/src/daemon-http.ts#buildDaemonHealthPayload';
+  const released = ledger({ declarations: { [movedFrom]: 'sha256:old' } });
+  const current = ledger({
+    declarations: { [movedTo]: 'sha256:new' },
+    compatibleChanges: [
+      {
+        declaration: movedTo,
+        digest: 'sha256:new',
+        rationale: 'The added parameter is caller-local; the wire payload is unchanged.',
+      },
+    ],
+  });
+  const digests = new Map(Object.entries({ [movedTo]: 'sha256:new' }));
+  const withoutAck = compareWireLedgers({
+    baselineTag: 'v0.20.6',
+    released,
+    current: ledger({ declarations: { [movedTo]: 'sha256:new' } }),
+    digests,
+  });
+  assert.deepEqual(withoutAck.changed, [movedTo]);
+  assert.deepEqual(withoutAck.removed, []);
+  assert.equal(withoutAck.failures.length, 1);
+  const withAck = compareWireLedgers({ baselineTag: 'v0.20.6', released, current, digests });
+  assert.deepEqual(withAck.failures, []);
+});
+
+// Names are not unique across files: while a baseline declaration still owns
+// the name at its own path, a same-named declaration elsewhere cannot be
+// identified as a move of this one, so the baseline key stays a removal.
+test('a name still owned by the baseline is not a move, so it remains a removal', () => {
+  const serverSendJson = 'src/daemon/server/http-server.ts#sendJson';
+  const uploadSendJson = 'src/daemon/upload-http.ts#sendJson';
+  const released = ledger({
+    declarations: { [serverSendJson]: 'sha256:old', [uploadSendJson]: 'sha256:eee' },
+  });
+  const current = ledger({ declarations: { [uploadSendJson]: 'sha256:eee' } });
+  const result = compareWireLedgers({
+    baselineTag: 'v0.20.6',
+    released,
+    current,
+    digests: new Map(Object.entries({ [uploadSendJson]: 'sha256:eee' })),
+  });
+  assert.deepEqual(result.removed, [serverSendJson]);
+  assert.deepEqual(result.moved, []);
+  assert.equal(result.failures.length, 1);
+});
+
 test('a newly added wire declaration is additive and needs nothing', () => {
   const added = 'packages/kernel/src/contracts.ts#NewEnvelope';
   const current = ledger({

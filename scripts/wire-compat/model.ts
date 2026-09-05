@@ -29,7 +29,15 @@ export type WireComparison = {
   changed: readonly string[];
   /** Declarations the baseline had and the current wire surface does not. */
   removed: readonly string[];
-  /** Declarations added since the baseline; additive, so never a failure. */
+  /**
+   * Baseline declarations that left their path but were re-declared unchanged
+   * (same name, same digest) at another path: a file move, never a failure.
+   */
+  moved: readonly string[];
+  /**
+   * Current keys the baseline never had (pure-move destinations excepted —
+   * their source is reported in `moved` instead). Additive, so never a failure.
+   */
   added: readonly string[];
   /** Whether the protocol version advanced since the baseline. */
   bumped: boolean;
@@ -43,12 +51,20 @@ export function compareWireLedgers(input: WireComparisonInput): WireComparison {
 
   const changed: string[] = [];
   const removed: string[] = [];
+  const moved: string[] = [];
+  const movedDestinations = new Set<string>();
+  const releasedKeys = new Set(Object.keys(released.declarations));
   for (const [key, releasedDigest] of Object.entries(released.declarations)) {
-    const digest = digests.get(key);
-    if (digest === undefined) removed.push(key);
-    else if (digest !== releasedDigest) changed.push(key);
+    const fate = baselineKeyFate(key, releasedDigest, digests, releasedKeys);
+    if (fate.kind === 'changed') changed.push(fate.reportKey);
+    else if (fate.kind === 'moved') {
+      moved.push(key);
+      movedDestinations.add(fate.destination);
+    } else if (fate.kind === 'removed') removed.push(key);
   }
-  const added = Object.keys(current.declarations).filter((key) => !(key in released.declarations));
+  const added = Object.keys(current.declarations).filter(
+    (key) => !(key in released.declarations) && !movedDestinations.has(key),
+  );
 
   const failures: string[] = [];
   const stillAt = `still ${current.protocolVersion}`;
@@ -85,5 +101,52 @@ export function compareWireLedgers(input: WireComparisonInput): WireComparison {
     }
   }
 
-  return { changed, removed, added, bumped, failures };
+  return { changed, removed, moved, added, bumped, failures };
+}
+
+type BaselineFate =
+  | { kind: 'unchanged' }
+  | { kind: 'changed'; reportKey: string }
+  | { kind: 'moved'; destination: string }
+  | { kind: 'removed' };
+
+/**
+ * What a baseline declaration became in the current surface.
+ *
+ * A declaration that left its path is a removal UNLESS it re-appears,
+ * unchanged, at exactly one new path — a file move, which a released peer
+ * still parses. A same-name re-declaration whose digest MOVED is a CHANGE at
+ * the destination: textually it is indistinguishable from "the baseline
+ * declaration was removed and a new same-named one appeared", so that reading
+ * is ackable (digest-pinned, rationale required) rather than bump-forcing.
+ * Matching is limited to candidates absent from the baseline itself: names are
+ * not unique across files (two files both declare `sendJson`), and a name that
+ * a baseline declaration still owns at its own path cannot identify a move.
+ */
+function baselineKeyFate(
+  key: string,
+  releasedDigest: string,
+  digests: ReadonlyMap<string, string>,
+  releasedKeys: ReadonlySet<string>,
+): BaselineFate {
+  const digest = digests.get(key);
+  if (digest !== undefined) {
+    return digest === releasedDigest ? { kind: 'unchanged' } : { kind: 'changed', reportKey: key };
+  }
+  const name = declarationName(key);
+  const candidates = [...digests.keys()].filter(
+    (candidate) =>
+      candidate !== key && declarationName(candidate) === name && !releasedKeys.has(candidate),
+  );
+  if (candidates.length !== 1) return { kind: 'removed' };
+  const candidate = candidates[0]!;
+  return digests.get(candidate) === releasedDigest
+    ? { kind: 'moved', destination: candidate }
+    : { kind: 'changed', reportKey: candidate };
+}
+
+/** The declaration name in a `<file>#<name>` key. */
+function declarationName(key: string): string {
+  const separator = key.lastIndexOf('#');
+  return separator >= 0 ? key.slice(separator + 1) : key;
 }
