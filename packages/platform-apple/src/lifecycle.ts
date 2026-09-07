@@ -63,6 +63,7 @@ export function bindAppleApplicationLifecycle(
       await params.host.appleApplications.resolveOpenTarget(params.device, input),
     prepareApplicationOpen: async (input) => {
       await ensureAppleReady(params.host, params.device, params.signal, {
+        deadlineAtMs: input.execution.startupDeadlineAtMs,
         onColdBootStart: input.prewarmRunnerOnColdBoot
           ? () => {
               void params.host.appleApplications
@@ -347,8 +348,12 @@ async function prepareAppleRunner(
   signal: AbortSignal,
   input: PrepareAppleRunnerInput,
 ): Promise<PrepareAppleRunnerResult> {
-  await ensureAppleReady(host, device, signal);
-  return await host.appleApplications.prepareRunner(device, input, signal);
+  // One budget covers the boot and the runner: a cold Simulator's boot spends part of it, and
+  // the runner preparation gets what is left rather than the full budget again.
+  const deadlineAtMs = Date.now() + input.timeoutMs;
+  await ensureAppleReady(host, device, signal, { deadlineAtMs });
+  const timeoutMs = Math.max(1, deadlineAtMs - Date.now());
+  return await host.appleApplications.prepareRunner(device, { ...input, timeoutMs }, signal);
 }
 
 type RunnerPrewarm = Readonly<{

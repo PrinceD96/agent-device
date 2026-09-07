@@ -244,6 +244,94 @@ test('discards a retained physical iOS runner when relaunch fails and preserves 
   expect(notifyRunnerAppRelaunched).not.toHaveBeenCalled();
 });
 
+test('prepare shares one startup budget across the Simulator boot and the runner preparation', async () => {
+  vi.useFakeTimers();
+  try {
+    const startedAtMs = 1_000_000;
+    vi.setSystemTime(startedAtMs);
+    const { host, calls, prepareRunner } = coldSimulatorLifecycleHost({
+      onBoot: () => vi.setSystemTime(startedAtMs + 10_000),
+      onBootstatus: () => vi.setSystemTime(startedAtMs + 50_000),
+    });
+    const lifecycle = bindAppleApplicationLifecycle({
+      host,
+      device: { ...simulator, booted: false },
+      signal: new AbortController().signal,
+    });
+
+    await lifecycle.prepareAppleRunner({ timeoutMs: 100_000, execution: {} });
+
+    // The boot wait gets what the boot left; the runner gets what the boot wait left.
+    expect(calls.find((call) => call.args.includes('bootstatus'))?.timeoutMs).toBe(90_000);
+    expect(prepareRunner).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ id: simulator.id }),
+      { timeoutMs: 50_000, execution: {} },
+      expect.anything(),
+    );
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('open forwards its startup deadline to the Simulator boot wait', async () => {
+  vi.useFakeTimers();
+  try {
+    const startedAtMs = 1_000_000;
+    vi.setSystemTime(startedAtMs);
+    const { host, calls } = coldSimulatorLifecycleHost({
+      onBoot: () => vi.setSystemTime(startedAtMs + 5_000),
+    });
+    const lifecycle = bindAppleApplicationLifecycle({
+      host,
+      device: { ...simulator, booted: false },
+      signal: new AbortController().signal,
+    });
+
+    await lifecycle.prepareApplicationOpen({
+      target: 'com.example.app',
+      hasExistingSession: false,
+      surface: 'app',
+      deviceHub: false,
+      prewarmRunnerOnColdBoot: false,
+      execution: { startupDeadlineAtMs: startedAtMs + 45_000 },
+    });
+
+    expect(calls.find((call) => call.args.includes('bootstatus'))?.timeoutMs).toBe(40_000);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+/** A Shutdown Simulator host whose boot and bootstatus calls run the given hooks before succeeding. */
+function coldSimulatorLifecycleHost(hooks: { onBoot?: () => void; onBootstatus?: () => void }) {
+  const calls: Array<{ args: string[]; timeoutMs?: number }> = [];
+  let state = 'Shutdown';
+  const run: PlatformRuntimeHost['appleTools']['run'] = vi.fn(async (request) => {
+    calls.push({ args: [...request.args], timeoutMs: request.timeoutMs });
+    if (request.args.includes('list')) {
+      return {
+        stdout: JSON.stringify({ devices: { ios: [{ udid: simulator.id, state }] } }),
+        stderr: '',
+        exitCode: 0,
+      };
+    }
+    if (request.args.includes('boot')) {
+      hooks.onBoot?.();
+      state = 'Booted';
+    }
+    if (request.args.includes('bootstatus')) hooks.onBootstatus?.();
+    return { stdout: '', stderr: '', exitCode: 0 };
+  });
+  const prepareRunner = vi.fn(async () => ({ runner: {}, connectMs: 0, healthCheckMs: 0 }));
+  const base = platformRuntimeHostFixture();
+  const host = {
+    ...base,
+    appleTools: { isXcrunAvailable: async () => true, run },
+    appleApplications: { ...base.appleApplications, prepareRunner },
+  } as unknown as PlatformRuntimeHost;
+  return { host, calls, prepareRunner };
+}
+
 function openInput(): OpenApplicationInput {
   return {
     target: 'com.example.app',

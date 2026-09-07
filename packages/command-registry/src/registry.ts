@@ -996,7 +996,8 @@ export const RAW_COMMAND_DESCRIPTORS = [
       allowSessionlessDefaultDevice: allowAnyDeviceSessionless,
       saveScriptFlagOwner: true,
     },
-    timeoutPolicy: DEFAULT_TIMEOUT_POLICY,
+    // --timeout is a startup budget: it reaches the Simulator boot wait (#2324).
+    timeoutPolicy: { ...DEFAULT_TIMEOUT_POLICY, budget: { source: 'flag', envelope: 'margin' } },
     batchable: true,
     platformExecution: { kind: 'device-runtime', uses: openApplicationRuntimePlanUses },
   },
@@ -1008,9 +1009,10 @@ export const RAW_COMMAND_DESCRIPTORS = [
     frameworkTier: 'extended',
     recordsSessionAction: false,
     daemon: { route: 'session', refFrameEffect: 'preserve' },
-    // Runner warm-up builds are the longest fixed envelope; --timeout overrides.
+    // Runner warm-up builds are the longest fixed envelope; --timeout is the
+    // daemon-side boot + runner budget, so the envelope keeps a margin over it.
     timeoutPolicy: {
-      budget: { source: 'flag' },
+      budget: { source: 'flag', envelope: 'margin' },
       envelopeMs: PREPARE_REQUEST_TIMEOUT_MS,
       onTimeout: 'reset-daemon',
     },
