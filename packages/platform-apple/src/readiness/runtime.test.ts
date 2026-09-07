@@ -170,6 +170,31 @@ test('a startup deadline is one budget shared by simctl boot and bootstatus, and
   }
 });
 
+test('a boot confirmed only after the deadline is a boot_timeout, and the confirming listing runs inside the budget', async () => {
+  vi.useFakeTimers();
+  try {
+    const startedAtMs = 1_000_000;
+    vi.setSystemTime(startedAtMs);
+    const { host, calls } = coldSimulatorHost({
+      onBoot: () => vi.setSystemTime(startedAtMs + 2_000),
+      onBootstatus: () => vi.setSystemTime(startedAtMs + 22_000),
+      onBootedList: () => vi.setSystemTime(startedAtMs + 31_000),
+    });
+
+    await expect(
+      ensureAppleReady(host, simulator(), new AbortController().signal, {
+        deadlineAtMs: startedAtMs + 30_000,
+      }),
+    ).rejects.toMatchObject({ details: { reason: 'boot_timeout', deviceId: 'sim-1' } });
+
+    const listings = calls.filter((call) => call.args.includes('list'));
+    expect(listings.at(-1)?.timeoutMs).toBe(8_000);
+    expect(calls.some((call) => call.args.includes('shutdown'))).toBe(false);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test('without a startup deadline the boot wait keeps its default budget', async () => {
   const { host, calls } = coldSimulatorHost({});
 
@@ -193,13 +218,18 @@ test('physical readiness forwards the request signal to the focused host port', 
   expect(ensureConnected).toHaveBeenCalledWith(expect.anything(), controller.signal);
 });
 
-/** A Shutdown Simulator whose boot and bootstatus calls run the given hooks before succeeding. */
-function coldSimulatorHost(hooks: { onBoot?: () => void; onBootstatus?: () => void }) {
+/** A Shutdown Simulator whose boot, bootstatus, and post-boot listing run the given hooks first. */
+function coldSimulatorHost(hooks: {
+  onBoot?: () => void;
+  onBootstatus?: () => void;
+  onBootedList?: () => void;
+}) {
   const calls: Array<{ args: string[]; timeoutMs?: number }> = [];
   let state = 'Shutdown';
   const run: PlatformRuntimeHost['appleTools']['run'] = vi.fn(async (request) => {
     calls.push({ args: [...request.args], timeoutMs: request.timeoutMs });
     if (request.args.includes('list')) {
+      if (state === 'Booted') hooks.onBootedList?.();
       return {
         stdout: JSON.stringify({ devices: { ios: [{ udid: 'sim-1', state }] } }),
         stderr: '',
